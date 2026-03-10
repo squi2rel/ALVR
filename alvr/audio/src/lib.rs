@@ -251,6 +251,7 @@ pub fn record_audio_blocking(
     device: &Device,
     channels_count: u16,
     mute: bool,
+    gain: f32,
 ) -> Result<()> {
     let config = device
         .default_input_config()
@@ -298,7 +299,8 @@ pub fn record_audio_blocking(
                     data.bytes().to_vec()
                 };
 
-                let data = downmix_audio(data, config.channels(), channels_count);
+                let mut data = downmix_audio(data, config.channels(), channels_count);
+                apply_gain_i16(&mut data, gain);
 
                 if is_running() {
                     sender.send_header_with_payload(&(), &data).ok();
@@ -337,6 +339,22 @@ pub fn record_audio_blocking(
     }
 
     res
+}
+
+fn apply_gain_i16(buffer: &mut [u8], gain: f32) {
+    if (gain - 1.0).abs() < f32::EPSILON {
+        return;
+    }
+
+    let gain = gain.max(0.0);
+    for chunk in buffer.chunks_exact_mut(2) {
+        let sample = i16::from_ne_bytes([chunk[0], chunk[1]]) as f32;
+        let scaled = (sample * gain).round();
+        let clamped = scaled.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        let bytes = clamped.to_ne_bytes();
+        chunk[0] = bytes[0];
+        chunk[1] = bytes[1];
+    }
 }
 
 // Audio callback. This is designed to be as less complex as possible. Still, when needed, this

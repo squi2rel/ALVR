@@ -26,6 +26,7 @@ pub fn record_audio_blocking(
     device: &Device,
     channels_count: u16,
     mute: bool,
+    gain: f32,
 ) -> Result<()> {
     assert_eq!(
         channels_count, 1,
@@ -76,6 +77,8 @@ pub fn record_audio_blocking(
 
     while is_running() && error.lock().is_none() {
         while let Ok(sample_buffer) = samples_receiver.recv_timeout(INPUT_RECV_TIMEOUT) {
+            let mut sample_buffer = sample_buffer;
+            apply_gain_i16(&mut sample_buffer, gain);
             sender.send_header_with_payload(&(), &sample_buffer).ok();
         }
     }
@@ -88,6 +91,22 @@ pub fn record_audio_blocking(
     }
 
     Ok(())
+}
+
+fn apply_gain_i16(buffer: &mut [u8], gain: f32) {
+    if (gain - 1.0).abs() < f32::EPSILON {
+        return;
+    }
+
+    let gain = gain.max(0.0);
+    for chunk in buffer.chunks_exact_mut(2) {
+        let sample = i16::from_ne_bytes([chunk[0], chunk[1]]) as f32;
+        let scaled = (sample * gain).round();
+        let clamped = scaled.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        let bytes = clamped.to_ne_bytes();
+        chunk[0] = bytes[0];
+        chunk[1] = bytes[1];
+    }
 }
 
 #[allow(unused_variables)]

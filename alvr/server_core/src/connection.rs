@@ -931,6 +931,7 @@ fn connection_pipeline(
                         &device,
                         2,
                         config.mute_when_streaming,
+                        1.0,
                     ) {
                         error!("Audio record error: {e:?}");
                     }
