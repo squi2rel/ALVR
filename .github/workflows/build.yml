@@ -1,0 +1,40 @@
+name: Build
+
+env:
+  CARGO_TERM_COLOR: always
+
+on:
+  workflow_dispatch:
+
+jobs:
+    build_windows_streamer:
+      runs-on: windows-2022
+      steps:
+        - uses: actions/checkout@v4
+          with:
+            submodules: true
+  
+        - uses: actions-rs/toolchain@v1
+          with:
+            toolchain: stable
+            override: true
+  
+        - uses: crazy-max/ghaction-chocolatey@v1
+          with:
+            args: install zip unzip pkgconfiglite wixtoolset
+  
+        - name: Build and package ALVR
+          id: build
+          env:
+            RUST_BACKTRACE: 1
+          run: |
+            cargo xtask package-streamer --gpl --ci
+            cargo xtask package-launcher --ci
+            
+        - name: Upload ALVR Artifacts
+          uses: actions/upload-artifact@v4
+          with:
+            name: alvr-windows-builds
+            path: |
+              ./build/alvr_streamer_windows.zip
+              ./build/alvr_launcher_windows.zip
