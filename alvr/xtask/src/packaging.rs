@@ -23,9 +23,13 @@ pub fn generate_licenses() -> String {
 
     let licenses_template = afs::crate_dir("xtask").join("licenses_template.hbs");
 
-    cmd!(sh, "cargo about generate {licenses_template}")
-        .read()
-        .unwrap()
+    let licenses_output = afs::crate_dir("xtask").join("licenses_output.html");
+
+    cmd!(sh, "cargo about generate {licenses_template} -o {licenses_output}")
+        .run()
+        .expect("Failed to run cargo-about");
+
+    return std::fs::read_to_string(&licenses_output).expect("Failed to read generated license file");
 }
 
 pub fn include_licenses(root_path: &Path, gpl: bool) {
