@@ -843,6 +843,13 @@ pub struct MicrophoneConfig {
     #[cfg_attr(target_os = "linux", schema(flag = "hidden"))]
     pub devices: MicrophoneDevicesConfig,
 
+    #[schema(strings(
+        display_name = "Microphone gain",
+        help = "Adjusts headset microphone volume before it is sent to the PC."
+    ))]
+    #[schema(gui(slider(min = 0.0, max = 2.0, step = 0.01)), suffix = "x")]
+    pub gain: f32,
+
     pub buffering: AudioBufferingConfig,
 }
 
@@ -1946,6 +1953,7 @@ pub fn session_settings_default() -> SettingsDefault {
                         },
                         variant: MicrophoneDevicesConfigDefaultVariant::Automatic,
                     },
+                    gain: 1.0,
                     buffering: AudioBufferingConfigDefault {
                         gui_collapsed: true,
                         average_buffering_ms: 50,
