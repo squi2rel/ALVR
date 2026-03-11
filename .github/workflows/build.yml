@@ -38,3 +38,40 @@ jobs:
             path: |
               ./build/alvr_streamer_windows.zip
               ./build/alvr_launcher_windows.zip
+
+    build_android_client:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+          with:
+            submodules: true
+          
+        - uses: actions-rs/toolchain@v1
+          with:
+            toolchain: stable
+            target: aarch64-linux-android
+            override: true
+        - uses: actions/setup-java@v2
+          with:
+            distribution: "temurin"
+            java-version: "17"
+        - uses: android-actions/setup-android@v3
+          with:
+            packages: "platforms;android-32"
+        - uses: nttld/setup-ndk@v1
+          id: setup-ndk
+          with:
+            ndk-version: r26b
+  
+        - name: Build and package ALVR
+          id: build
+          env:
+            RUST_BACKTRACE: 1
+            ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          run: cargo xtask package-client --ci
+  
+        - name: Upload APK
+          uses: actions/upload-artifact@v4
+          with:
+            name: alvr_client_android
+            path: ./build/alvr_client_android/*.apk
