@@ -42,6 +42,14 @@ void _SetChaperoneArea(float areaWidth, float areaHeight);
 vr::EVREventType VendorEvent_ALVRDriverResync
     = (vr::EVREventType)(vr::VREvent_VendorSpecific_Reserved_Start + ((vr::EVREventType)0xC0));
 
+extern "C" int RustOpenvrDriverInit();
+
+enum RustOpenvrDriverInitResult {
+    RustOpenvrDriverInitSuccess = 0,
+    RustOpenvrDriverInitInvalidProcess = 1,
+    RustOpenvrDriverInitFailed = 2,
+};
+
 static void load_debug_privilege(void) {
 #ifdef _WIN32
     const DWORD flags = TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY;
@@ -91,6 +99,13 @@ public:
     std::map<uint64_t, TrackedDevice*> tracked_devices;
 
     virtual vr::EVRInitError Init(vr::IVRDriverContext* pContext) override {
+        int rust_init_result = RustOpenvrDriverInit();
+        if (rust_init_result != RustOpenvrDriverInitSuccess) {
+            return rust_init_result == RustOpenvrDriverInitInvalidProcess
+                ? vr::VRInitError_Init_InvalidProcessId
+                : vr::VRInitError_Driver_Failed;
+        }
+
         Debug("DriverProvider::Init");
 
         VR_INIT_SERVER_DRIVER_CONTEXT(pContext);
@@ -234,12 +249,29 @@ void CppInit(bool earlyHmdInitialization) {
     load_debug_privilege();
 }
 
+bool CppOpenvrEntryPointIsSupported(const char* interface_name) {
+    return interface_name != nullptr
+        && std::string(interface_name) == vr::IServerTrackedDeviceProvider_Version;
+}
+
+void* CppOpenvrEntryPointUnsupported(int* return_code) {
+    if (return_code != nullptr) {
+        *return_code = vr::VRInitError_Init_InterfaceNotFound;
+    }
+
+    return nullptr;
+}
+
 void* CppOpenvrEntryPoint(const char* interface_name, int* return_code) {
-    if (std::string(interface_name) == vr::IServerTrackedDeviceProvider_Version) {
-        *return_code = vr::VRInitError_None;
+    if (CppOpenvrEntryPointIsSupported(interface_name)) {
+        if (return_code != nullptr) {
+            *return_code = vr::VRInitError_None;
+        }
         return &g_driver_provider;
     } else {
-        *return_code = vr::VRInitError_Init_InterfaceNotFound;
+        if (return_code != nullptr) {
+            *return_code = vr::VRInitError_Init_InterfaceNotFound;
+        }
         return nullptr;
     }
 }

@@ -27,6 +27,7 @@ use alvr_server_core::{HandType, ServerCoreContext, ServerCoreEvent};
 use alvr_session::{CodecType, ControllersConfig};
 use std::{
     collections::VecDeque,
+    env,
     ffi::{CString, OsStr, c_char, c_void},
     ptr,
     sync::{Once, mpsc},
@@ -37,6 +38,24 @@ use std::{
 static SERVER_CORE_CONTEXT: RwLock<Option<ServerCoreContext>> = RwLock::new(None);
 static LOCAL_VIEW_PARAMS: RwLock<[ViewParams; 2]> = RwLock::new([ViewParams::DUMMY; 2]);
 static HEAD_POSE_QUEUE: Mutex<VecDeque<(Duration, Pose)>> = Mutex::new(VecDeque::new());
+
+const OPENVR_INIT_SUCCESS: i32 = 0;
+const OPENVR_INIT_INVALID_PROCESS: i32 = 1;
+const OPENVR_INIT_FAILED: i32 = 2;
+
+fn current_process_name() -> Option<String> {
+    Some(
+        env::current_exe()
+            .ok()?
+            .file_name()?
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+fn is_vrserver_process_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case(&afs::exec_fname("vrserver"))
+}
 
 fn event_loop(events_receiver: mpsc::Receiver<ServerCoreEvent>) {
     thread::spawn(move || {
@@ -475,13 +494,29 @@ pub unsafe extern "C" fn HmdDriverFactory(
     interface_name: *const c_char,
     return_code: *mut i32,
 ) -> *mut c_void {
+    if unsafe { !CppOpenvrEntryPointIsSupported(interface_name) } {
+        return unsafe { CppOpenvrEntryPointUnsupported(return_code) };
+    }
+
+    unsafe { CppOpenvrEntryPoint(interface_name, return_code) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RustOpenvrDriverInit() -> i32 {
+    if !current_process_name()
+        .as_deref()
+        .is_some_and(is_vrserver_process_name)
+    {
+        return OPENVR_INIT_INVALID_PROCESS;
+    }
+
     let Ok(driver_dir) = alvr_server_io::get_driver_dir_from_registered() else {
-        return ptr::null_mut();
+        return OPENVR_INIT_FAILED;
     };
     let Some(filesystem_layout) =
         alvr_filesystem::filesystem_layout_from_openvr_driver_root_dir(&driver_dir)
     else {
-        return ptr::null_mut();
+        return OPENVR_INIT_FAILED;
     };
 
     let system = sysinfo::System::new_all();
@@ -552,5 +587,5 @@ pub unsafe extern "C" fn HmdDriverFactory(
         event_loop(events_receiver);
     });
 
-    unsafe { CppOpenvrEntryPoint(interface_name, return_code) }
+    OPENVR_INIT_SUCCESS
 }
