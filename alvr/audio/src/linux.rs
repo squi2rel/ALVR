@@ -84,6 +84,7 @@ pub fn audio_loop(
     speaker_info: Option<AudioInfo>,
     receiver: &mut StreamReceiver<()>,
     mic_info: Option<(AudioInfo, AudioBufferingConfig)>,
+    mic_sample_gain: impl Fn() -> f32,
 ) {
     let sample_queue = Arc::new(Mutex::new(VecDeque::new()));
     MIC_STREAMING.store(false, Ordering::Relaxed);
@@ -115,13 +116,14 @@ pub fn audio_loop(
             let batch_frames_count = rate * buffering.batch_ms as usize / 1000;
             let average_buffer_frames_count = rate * buffering.average_buffering_ms as usize / 1000;
 
-            if let Err(e) = crate::receive_samples_loop(
+            if let Err(e) = crate::receive_samples_loop_with_gain(
                 || is_running() && MIC_STREAMING.load(Ordering::Relaxed),
                 receiver,
                 sample_queue.clone(),
                 mic_info.channel_count as usize,
                 batch_frames_count,
                 average_buffer_frames_count,
+                || mic_sample_gain(),
             ) {
                 error!("Receive samples loop encountered error {e:?}");
             }

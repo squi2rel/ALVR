@@ -25,7 +25,7 @@ use alvr_packets::{
 };
 use alvr_session::{
     BodyTrackingSinkConfig, CodecType, ControllersEmulationMode, FrameSize, H264Profile,
-    OpenvrConfig, SessionConfig, SocketProtocol,
+    OpenvrConfig, SessionConfig, Settings, SocketProtocol,
 };
 use alvr_sockets::{
     CONTROL_PORT, KEEPALIVE_INTERVAL, KEEPALIVE_TIMEOUT, PeerType, ProtoControlSocket,
@@ -62,6 +62,16 @@ fn is_streaming(client_hostname: &str) -> bool {
         .client_list()
         .get(client_hostname)
         .is_some_and(|c| c.connection_state == ConnectionState::Streaming)
+}
+
+fn microphone_gain_from_settings(settings: &Settings) -> f32 {
+    settings
+        .audio
+        .microphone
+        .as_option()
+        .map(|config| config.gain)
+        .unwrap_or(1.0)
+        .max(0.0)
 }
 
 pub fn contruct_openvr_config(session: &SessionConfig) -> OpenvrConfig {
@@ -572,6 +582,9 @@ fn connection_pipeline(
     dbg_connection!("connection_pipeline: setting up negotiated streaming config");
 
     let initial_settings = session_manager_lock.settings().clone();
+    let microphone_gain = Arc::new(RwLock::new(microphone_gain_from_settings(
+        &initial_settings,
+    )));
 
     fn get_view_res(config: FrameSize, default_res: UVec2) -> UVec2 {
         let res = match config {
@@ -931,7 +944,6 @@ fn connection_pipeline(
                         &device,
                         2,
                         config.mute_when_streaming,
-                        1.0,
                     ) {
                         error!("Audio record error: {e:?}");
                     }
@@ -979,8 +991,9 @@ fn connection_pipeline(
         }
 
         let client_hostname = client_hostname.clone();
+        let microphone_gain = Arc::clone(&microphone_gain);
         thread::spawn(move || {
-            alvr_common::show_err(alvr_audio::play_audio_loop(
+            alvr_common::show_err(alvr_audio::play_audio_loop_with_gain(
                 {
                     let client_hostname = client_hostname.clone();
                     move || is_streaming(&client_hostname)
@@ -990,6 +1003,7 @@ fn connection_pipeline(
                 streaming_caps.microphone_sample_rate,
                 config.buffering,
                 &mut microphone_receiver,
+                || *microphone_gain.read(),
             ));
         })
     } else {
@@ -1022,6 +1036,7 @@ fn connection_pipeline(
 
         if mic.is_some() || audio_info.is_some() {
             let client_hostname = client_hostname.clone();
+            let microphone_gain = Arc::clone(&microphone_gain);
             thread::spawn(move || {
                 linux::audio_loop(
                     {
@@ -1032,6 +1047,7 @@ fn connection_pipeline(
                     audio_info,
                     &mut microphone_receiver,
                     mic,
+                    || *microphone_gain.read(),
                 );
             })
         } else {
@@ -1098,16 +1114,22 @@ fn connection_pipeline(
 
     let real_time_update_thread = thread::spawn({
         let control_sender = Arc::clone(&control_sender);
+        let microphone_gain = Arc::clone(&microphone_gain);
         let client_hostname = client_hostname.clone();
         move || {
             let mut previous_config = None;
             while is_streaming(&client_hostname) {
-                let config = {
+                let (config, gain) = {
                     let session_manager_lock = SESSION_MANAGER.read();
                     let settings = session_manager_lock.settings();
 
-                    RealTimeConfig::from_settings(settings)
+                    (
+                        RealTimeConfig::from_settings(settings),
+                        microphone_gain_from_settings(settings),
+                    )
                 };
+
+                *microphone_gain.write() = gain;
 
                 let same_config = previous_config.as_ref().is_some_and(|prev| config == *prev);
                 if !same_config {

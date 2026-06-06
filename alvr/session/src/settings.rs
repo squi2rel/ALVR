@@ -843,10 +843,13 @@ pub struct MicrophoneConfig {
     #[cfg_attr(target_os = "linux", schema(flag = "hidden"))]
     pub devices: MicrophoneDevicesConfig,
 
-    #[schema(strings(display_name = "Microphone gain"))]
     #[schema(
-        strings(help = "Adjusts headset microphone volume before it is sent to the PC."),
-        gui(slider(min = 0.0, max = 2.0, step = 0.01)),
+        strings(
+            display_name = "Microphone gain",
+            help = "Adjusts headset microphone volume before it is sent to the PC."
+        ),
+        flag = "real-time",
+        gui(slider(min = 0.0, max = 20.0, step = 0.01)),
         suffix = "x"
     )]
     pub gain: f32,

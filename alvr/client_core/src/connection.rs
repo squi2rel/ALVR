@@ -358,11 +358,10 @@ fn connection_pipeline(
         thread::spawn(|| ())
     };
 
-    let microphone_thread = if let Switch::Enabled(config) = settings.audio.microphone {
+    let microphone_thread = if matches!(settings.audio.microphone, Switch::Enabled(_)) {
         let device = alvr_audio::new_input(None).to_con()?;
 
         let microphone_sender = stream_socket.request_stream(AUDIO);
-        let gain = config.gain;
 
         thread::spawn({
             let ctx = Arc::clone(&ctx);
@@ -375,7 +374,6 @@ fn connection_pipeline(
                         &device,
                         1,
                         false,
-                        gain,
                     ) {
                         Ok(()) => break,
                         Err(e) => {

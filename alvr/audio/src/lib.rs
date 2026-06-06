@@ -251,7 +251,6 @@ pub fn record_audio_blocking(
     device: &Device,
     channels_count: u16,
     mute: bool,
-    gain: f32,
 ) -> Result<()> {
     let config = device
         .default_input_config()
@@ -299,8 +298,7 @@ pub fn record_audio_blocking(
                     data.bytes().to_vec()
                 };
 
-                let mut data = downmix_audio(data, config.channels(), channels_count);
-                apply_gain_i16(&mut data, gain);
+                let data = downmix_audio(data, config.channels(), channels_count);
 
                 if is_running() {
                     sender.send_header_with_payload(&(), &data).ok();
@@ -339,22 +337,6 @@ pub fn record_audio_blocking(
     }
 
     res
-}
-
-fn apply_gain_i16(buffer: &mut [u8], gain: f32) {
-    if (gain - 1.0).abs() < f32::EPSILON {
-        return;
-    }
-
-    let gain = gain.max(0.0);
-    for chunk in buffer.chunks_exact_mut(2) {
-        let sample = i16::from_ne_bytes([chunk[0], chunk[1]]) as f32;
-        let scaled = (sample * gain).round();
-        let clamped = scaled.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
-        let bytes = clamped.to_ne_bytes();
-        chunk[0] = bytes[0];
-        chunk[1] = bytes[1];
-    }
 }
 
 // Audio callback. This is designed to be as less complex as possible. Still, when needed, this
@@ -399,6 +381,26 @@ pub fn receive_samples_loop(
     batch_frames_count: usize,
     average_buffer_frames_count: usize,
 ) -> Result<()> {
+    receive_samples_loop_with_gain(
+        is_running,
+        receiver,
+        sample_buffer,
+        channels_count,
+        batch_frames_count,
+        average_buffer_frames_count,
+        || 1.0,
+    )
+}
+
+pub fn receive_samples_loop_with_gain(
+    is_running: impl Fn() -> bool,
+    receiver: &mut StreamReceiver<()>,
+    sample_buffer: Arc<Mutex<VecDeque<f32>>>,
+    channels_count: usize,
+    batch_frames_count: usize,
+    average_buffer_frames_count: usize,
+    sample_gain: impl Fn() -> f32,
+) -> Result<()> {
     let mut recovery_sample_buffer = vec![];
     while is_running() {
         let data = match receiver.recv(Duration::from_millis(500)) {
@@ -408,9 +410,10 @@ pub fn receive_samples_loop(
         };
         let (_, packet) = data.get()?;
 
+        let gain = sanitize_audio_gain(sample_gain());
         let new_samples = packet
             .chunks_exact(2)
-            .map(|c| i16::from_ne_bytes([c[0], c[1]]).to_sample::<f32>())
+            .map(|c| (i16::from_ne_bytes([c[0], c[1]]).to_sample::<f32>() * gain).clamp(-1.0, 1.0))
             .collect::<Vec<_>>();
 
         let mut sample_buffer_ref = sample_buffer.lock();
@@ -492,6 +495,10 @@ pub fn receive_samples_loop(
     Ok(())
 }
 
+fn sanitize_audio_gain(gain: f32) -> f32 {
+    if gain.is_finite() { gain.max(0.0) } else { 1.0 }
+}
+
 struct StreamingSource {
     sample_buffer: Arc<Mutex<VecDeque<f32>>>,
     current_batch: Vec<f32>,
@@ -549,6 +556,26 @@ pub fn play_audio_loop(
     config: AudioBufferingConfig,
     receiver: &mut StreamReceiver<()>,
 ) -> Result<()> {
+    play_audio_loop_with_gain(
+        is_running,
+        device,
+        channels_count,
+        sample_rate,
+        config,
+        receiver,
+        || 1.0,
+    )
+}
+
+pub fn play_audio_loop_with_gain(
+    is_running: impl Fn() -> bool,
+    device: &Device,
+    channels_count: u16,
+    sample_rate: u32,
+    config: AudioBufferingConfig,
+    receiver: &mut StreamReceiver<()>,
+    sample_gain: impl Fn() -> f32,
+) -> Result<()> {
     // Size of a chunk of frames. It corresponds to the duration if a fade-in/out in frames.
     let batch_frames_count = sample_rate as usize * config.batch_ms as usize / 1000;
 
@@ -569,13 +596,14 @@ pub fn play_audio_loop(
         batch_frames_count,
     });
 
-    receive_samples_loop(
+    receive_samples_loop_with_gain(
         is_running,
         receiver,
         sample_buffer,
         channels_count as _,
         batch_frames_count,
         average_buffer_frames_count,
+        sample_gain,
     )
     .ok();
 
