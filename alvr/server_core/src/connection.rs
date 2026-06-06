@@ -1092,7 +1092,11 @@ fn connection_pipeline(
                 if let Some(stats) = &mut *ctx.statistics_manager.write() {
                     let timestamp = client_stats.target_timestamp;
                     let decoder_latency = client_stats.video_decode;
-                    let (network_latency, game_latency) = stats.report_statistics(client_stats);
+                    let Some((network_latency, game_latency)) =
+                        stats.report_statistics(client_stats)
+                    else {
+                        continue;
+                    };
 
                     ctx.events_sender
                         .send(ServerCoreEvent::GameRenderLatencyFeedback(game_latency))

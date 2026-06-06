@@ -5,6 +5,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+const MAX_VALID_VSYNC_QUEUE: Duration = Duration::from_secs(1);
+const MAX_VALID_TOTAL_PIPELINE_LATENCY: Duration = Duration::from_secs(1);
+
 struct HistoryFrame {
     input_acquired: Instant,
     video_packet_received: Instant,
@@ -88,40 +91,92 @@ impl StatisticsManager {
 
     // vsync_queue is the latency between this call and the vsync. it cannot be measured by ALVR and
     // should be reported by the VR runtime
-    pub fn report_submit(&mut self, target_timestamp: Duration, vsync_queue: Duration) {
+    pub fn report_submit(
+        &mut self,
+        target_timestamp: Duration,
+        vsync_queue: Duration,
+    ) -> Option<ClientStatistics> {
         let now = Instant::now();
 
-        if let Some(frame) = self
+        let frame_index = self
             .history_buffer
-            .iter_mut()
-            .find(|frame| frame.client_stats.target_timestamp == target_timestamp)
-        {
-            frame.client_stats.rendering = now.saturating_duration_since(
-                frame.video_packet_received
-                    + frame.client_stats.video_decode
-                    + frame.client_stats.video_decoder_queue,
-            );
-            frame.client_stats.vsync_queue = vsync_queue;
-            frame.client_stats.total_pipeline_latency =
-                now.saturating_duration_since(frame.input_acquired) + vsync_queue;
-            self.total_pipeline_latency_average
-                .submit_sample(frame.client_stats.total_pipeline_latency);
-
-            let vsync = now + vsync_queue;
-            frame.client_stats.frame_interval = vsync.saturating_duration_since(self.prev_vsync);
-            self.prev_vsync = vsync;
-        }
-    }
-
-    pub fn summary(&self, target_timestamp: Duration) -> Option<ClientStatistics> {
-        self.history_buffer
             .iter()
-            .find(|frame| frame.client_stats.target_timestamp == target_timestamp)
-            .map(|frame| frame.client_stats.clone())
+            .position(|frame| frame.client_stats.target_timestamp == target_timestamp)?;
+
+        let frame = &self.history_buffer[frame_index];
+        let rendering = now.saturating_duration_since(
+            frame.video_packet_received
+                + frame.client_stats.video_decode
+                + frame.client_stats.video_decoder_queue,
+        );
+        let pipeline_latency_before_vsync = now.saturating_duration_since(frame.input_acquired);
+        let total_pipeline_latency = pipeline_latency_before_vsync.checked_add(vsync_queue);
+
+        let valid_sample = vsync_queue <= MAX_VALID_VSYNC_QUEUE
+            && pipeline_latency_before_vsync <= MAX_VALID_TOTAL_PIPELINE_LATENCY
+            && total_pipeline_latency
+                .is_some_and(|latency| latency <= MAX_VALID_TOTAL_PIPELINE_LATENCY);
+
+        if !valid_sample {
+            self.history_buffer.remove(frame_index);
+
+            return None;
+        }
+
+        let total_pipeline_latency = total_pipeline_latency.unwrap();
+
+        let frame = &mut self.history_buffer[frame_index];
+        frame.client_stats.rendering = rendering;
+        frame.client_stats.vsync_queue = vsync_queue;
+        frame.client_stats.total_pipeline_latency = total_pipeline_latency;
+        self.total_pipeline_latency_average
+            .submit_sample(frame.client_stats.total_pipeline_latency);
+
+        let vsync = now + vsync_queue;
+        frame.client_stats.frame_interval = vsync.saturating_duration_since(self.prev_vsync);
+        self.prev_vsync = vsync;
+
+        Some(frame.client_stats.clone())
     }
 
     // latency used for head prediction
     pub fn average_total_pipeline_latency(&self) -> Duration {
         self.total_pipeline_latency_average.get_average()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drops_unreasonable_vsync_queue_samples() {
+        let mut stats = StatisticsManager::new(16);
+        let timestamp = Duration::from_secs(1);
+
+        stats.report_input_acquired(timestamp);
+
+        assert!(
+            stats
+                .report_submit(timestamp, Duration::from_millis(3_270_543))
+                .is_none()
+        );
+        assert_eq!(stats.average_total_pipeline_latency(), Duration::ZERO);
+    }
+
+    #[test]
+    fn keeps_reasonable_submit_samples() {
+        let mut stats = StatisticsManager::new(16);
+        let timestamp = Duration::from_secs(1);
+
+        stats.report_input_acquired(timestamp);
+
+        let client_stats = stats
+            .report_submit(timestamp, Duration::from_millis(5))
+            .unwrap();
+
+        assert_eq!(client_stats.target_timestamp, timestamp);
+        assert_eq!(client_stats.vsync_queue, Duration::from_millis(5));
+        assert!(client_stats.total_pipeline_latency >= Duration::from_millis(5));
     }
 }

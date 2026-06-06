@@ -8,6 +8,8 @@ use std::{
 
 const FULL_REPORT_INTERVAL: Duration = Duration::from_millis(500);
 const EPS_INTERVAL: Duration = Duration::from_micros(1);
+const MAX_VALID_CLIENT_VSYNC_QUEUE: Duration = Duration::from_secs(1);
+const MAX_VALID_CLIENT_TOTAL_PIPELINE_LATENCY: Duration = Duration::from_secs(1);
 
 pub struct HistoryFrame {
     target_timestamp: Duration,
@@ -174,7 +176,16 @@ impl StatisticsManager {
 
     // Called every frame. Some statistics are reported once every frame
     // Returns (network latency, game time latency)
-    pub fn report_statistics(&mut self, client_stats: ClientStatistics) -> (Duration, Duration) {
+    pub fn report_statistics(
+        &mut self,
+        client_stats: ClientStatistics,
+    ) -> Option<(Duration, Duration)> {
+        if client_stats.vsync_queue > MAX_VALID_CLIENT_VSYNC_QUEUE
+            || client_stats.total_pipeline_latency > MAX_VALID_CLIENT_TOTAL_PIPELINE_LATENCY
+        {
+            return None;
+        }
+
         self.motion_to_photon_latency_average
             .submit_sample(client_stats.total_pipeline_latency);
 
@@ -281,9 +292,9 @@ impl StatisticsManager {
                 bitrate_bps,
             }));
 
-            (network_latency, game_time_latency)
+            Some((network_latency, game_time_latency))
         } else {
-            (Duration::ZERO, Duration::ZERO)
+            None
         }
     }
 

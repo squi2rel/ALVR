@@ -21,7 +21,6 @@ use alvr_common::{
     ConnectionState, LifecycleState, ViewParams, dbg_client_core, error,
     glam::{UVec2, Vec2},
     parking_lot::{Mutex, RwLock},
-    warn,
 };
 use alvr_packets::{
     BatteryInfo, ButtonEntry, ClientControlPacket, RealTimeConfig, StreamConfig, TrackingData,
@@ -297,14 +296,10 @@ impl ClientCoreContext {
         dbg_client_core!("report_submit");
 
         if let Some(stats) = &mut *self.connection_context.statistics_manager.lock() {
-            stats.report_submit(timestamp, vsync_queue);
-
-            if let Some(sender) = &mut *self.connection_context.statistics_sender.lock() {
-                if let Some(stats) = stats.summary(timestamp) {
-                    sender.send_header(&stats).ok();
-                } else {
-                    warn!("Statistics summary not ready!");
-                }
+            if let Some(client_stats) = stats.report_submit(timestamp, vsync_queue)
+                && let Some(sender) = &mut *self.connection_context.statistics_sender.lock()
+            {
+                sender.send_header(&client_stats).ok();
             }
         }
     }
