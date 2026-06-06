@@ -44,7 +44,7 @@ jobs:
         run: echo "release_ref=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
   build_windows_streamer:
-    runs-on: windows-latest
+    runs-on: [self-hosted, Windows, X64]
     needs: [prepare_release]
     steps:
       - uses: actions/checkout@v6
