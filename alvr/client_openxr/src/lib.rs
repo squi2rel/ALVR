@@ -469,7 +469,7 @@ pub fn entry_point() {
                         lobby.update_hud_message(&message);
                     }
                     ClientCoreEvent::StreamingStarted(config) => {
-                        let config = ParsedStreamConfig::new(&config);
+                        let config = ParsedStreamConfig::new(&config, default_view_resolution);
 
                         let context = StreamContext::new(
                             Arc::clone(&core_context),

@@ -3,7 +3,9 @@ use alvr_common::{
     ViewParams,
     glam::{self, Mat4, UVec2, Vec3, Vec4},
 };
-use alvr_session::{FoveatedEncodingConfig, PassthroughMode, UpscalingConfig};
+use alvr_session::{
+    FoveatedEncodingConfig, PassthroughMode, UpscalingConfig, ViewResolutionScalingMode,
+};
 use std::{ffi::c_void, iter, mem, rc::Rc};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
@@ -60,6 +62,7 @@ impl StreamRenderer {
         context: Rc<GraphicsContext>,
         base_view_resolution: UVec2,
         target_view_resolution: UVec2,
+        _view_resolution_scaling: ViewResolutionScalingMode,
         swapchain_textures: [Vec<u32>; 2],
         target_format: u32,
         foveated_encoding: Option<FoveatedEncodingConfig>,

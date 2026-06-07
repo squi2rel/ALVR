@@ -10,7 +10,8 @@ use crate::{
 use alvr_adb::{WiredConnection, WiredConnectionStatus};
 use alvr_common::{
     AnyhowToCon, BUTTON_INFO, CONTROLLER_PROFILE_INFO, ConResult, ConnectionError, ConnectionState,
-    LifecycleState, QUEST_CONTROLLER_PROFILE_PATH, con_bail, dbg_connection, debug, error,
+    Fov, LifecycleState, QUEST_CONTROLLER_PROFILE_PATH, ViewParams, con_bail, dbg_connection,
+    debug, error,
     glam::{UVec2, Vec2},
     info,
     parking_lot::{Condvar, Mutex, RwLock},
@@ -25,7 +26,7 @@ use alvr_packets::{
 };
 use alvr_session::{
     BodyTrackingSinkConfig, CodecType, ControllersEmulationMode, FrameSize, H264Profile,
-    OpenvrConfig, SessionConfig, Settings, SocketProtocol,
+    OpenvrConfig, SessionConfig, Settings, SocketProtocol, ViewResolutionScalingMode,
 };
 use alvr_sockets::{
     CONTROL_PORT, KEEPALIVE_INTERVAL, KEEPALIVE_TIMEOUT, PeerType, ProtoControlSocket,
@@ -54,6 +55,75 @@ pub struct VideoPacket {
 
 fn align32(value: f32) -> u32 {
     ((value / 32.).floor() * 32.) as u32
+}
+
+fn scale_fov_axis(negative_angle: f32, positive_angle: f32, scale: f32) -> (f32, f32) {
+    let negative = negative_angle.tan();
+    let positive = positive_angle.tan();
+    let center = (negative + positive) * 0.5;
+    let half_size = (positive - negative) * 0.5 * scale;
+
+    ((center - half_size).atan(), (center + half_size).atan())
+}
+
+fn scale_fov_for_no_scaling(fov: Fov, scale: Vec2) -> Fov {
+    let (left, right) = scale_fov_axis(fov.left, fov.right, scale.x);
+    let (down, up) = scale_fov_axis(fov.down, fov.up, scale.y);
+
+    Fov {
+        left,
+        right,
+        up,
+        down,
+    }
+}
+
+fn scale_view_params_for_no_scaling(params: &mut [ViewParams; 2], scale: Vec2) {
+    for params in params {
+        params.fov = scale_fov_for_no_scaling(params.fov, scale);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!((actual - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn no_scaling_fov_scale_uses_tangent_space() {
+        let fov = Fov {
+            left: (-1.0_f32).atan(),
+            right: 1.0_f32.atan(),
+            up: 1.0_f32.atan(),
+            down: (-1.0_f32).atan(),
+        };
+        let scale = 800.0 / 2160.0;
+        let fov = scale_fov_for_no_scaling(fov, Vec2::splat(scale));
+
+        assert_close(fov.left.tan(), -scale);
+        assert_close(fov.right.tan(), scale);
+        assert_close(fov.down.tan(), -scale);
+        assert_close(fov.up.tan(), scale);
+    }
+
+    #[test]
+    fn no_scaling_fov_scale_preserves_asymmetric_center() {
+        let fov = Fov {
+            left: (-0.8_f32).atan(),
+            right: 1.2_f32.atan(),
+            up: 1.1_f32.atan(),
+            down: (-0.9_f32).atan(),
+        };
+        let fov = scale_fov_for_no_scaling(fov, Vec2::splat(0.5));
+
+        assert_close((fov.left.tan() + fov.right.tan()) * 0.5, 0.2);
+        assert_close((fov.down.tan() + fov.up.tan()) * 0.5, 0.1);
+        assert_close(fov.right.tan() - fov.left.tan(), 1.0);
+        assert_close(fov.up.tan() - fov.down.tan(), 1.0);
+    }
 }
 
 fn is_streaming(client_hostname: &str) -> bool {
@@ -587,24 +657,9 @@ fn connection_pipeline(
     )));
 
     fn get_view_res(config: FrameSize, default_res: UVec2) -> UVec2 {
-        let res = match config {
-            FrameSize::Scale(scale) => default_res.as_vec2() * scale,
-            FrameSize::Absolute { width, height } => {
-                let width = width as f32;
-                Vec2::new(
-                    width,
-                    height.map_or_else(
-                        || {
-                            let default_res = default_res.as_vec2();
-                            width * default_res.y / default_res.x
-                        },
-                        |h| h as f32,
-                    ),
-                )
-            }
-        };
+        let res = config.resolve(default_res);
 
-        UVec2::new(align32(res.x), align32(res.y))
+        UVec2::new(align32(res.x as f32), align32(res.y as f32))
     }
 
     let mut transcoding_view_resolution = get_view_res(
@@ -649,6 +704,40 @@ fn connection_pipeline(
             .clone(),
         streaming_caps.default_view_resolution,
     );
+
+    let client_native_view_resolution = initial_settings
+        .video
+        .client_native_view_resolution
+        .resolve(streaming_caps.default_view_resolution);
+    let client_target_view_resolution = match initial_settings.video.view_resolution_scaling {
+        ViewResolutionScalingMode::Scale => transcoding_view_resolution,
+        ViewResolutionScalingMode::NoScaling => client_native_view_resolution,
+    };
+
+    info!(
+        "Client headset view resolution for {client_hostname}: default={}x{} native={}x{} \
+        max={}x{} stream={}x{} client_target={}x{} scaling={:?}",
+        streaming_caps.default_view_resolution.x,
+        streaming_caps.default_view_resolution.y,
+        client_native_view_resolution.x,
+        client_native_view_resolution.y,
+        streaming_caps.max_view_resolution.x,
+        streaming_caps.max_view_resolution.y,
+        transcoding_view_resolution.x,
+        transcoding_view_resolution.y,
+        client_target_view_resolution.x,
+        client_target_view_resolution.y,
+        initial_settings.video.view_resolution_scaling,
+    );
+    let no_scaling_fov_scale = (initial_settings.video.view_resolution_scaling
+        == ViewResolutionScalingMode::NoScaling)
+        .then(|| transcoding_view_resolution.as_vec2() / client_native_view_resolution.as_vec2());
+    if let Some(scale) = no_scaling_fov_scale {
+        info!(
+            "No-scaling server FOV scale for {client_hostname}: {:.6}x{:.6}",
+            scale.x, scale.y,
+        );
+    }
 
     let fps = {
         let mut best_match = 0_f32;
@@ -1245,7 +1334,10 @@ fn connection_pipeline(
                         }
                         ctx.events_sender.send(ServerCoreEvent::RequestIDR).ok();
                     }
-                    ClientControlPacket::LocalViewParams(params) => {
+                    ClientControlPacket::LocalViewParams(mut params) => {
+                        if let Some(scale) = no_scaling_fov_scale {
+                            scale_view_params_for_no_scaling(&mut params, scale);
+                        }
                         ctx.events_sender
                             .send(ServerCoreEvent::LocalViewParams(params))
                             .ok();

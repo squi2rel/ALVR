@@ -20,6 +20,7 @@ use alvr_graphics::{
 use alvr_packets::{ButtonEntry, ButtonValue, FaceData, TrackingData};
 use alvr_session::{
     CodecType, FoveatedEncodingConfig, MediacodecPropType, MediacodecProperty, UpscalingConfig,
+    ViewResolutionScalingMode,
 };
 use std::{
     cell::RefCell,
@@ -35,6 +36,7 @@ static HUD_MESSAGE: Mutex<String> = Mutex::new(String::new());
 static SETTINGS: Mutex<String> = Mutex::new(String::new());
 static SERVER_VERSION: Mutex<String> = Mutex::new(String::new());
 static DECODER_CONFIG_BUFFER: Mutex<Vec<u8>> = Mutex::new(vec![]);
+static DEFAULT_VIEW_RESOLUTION: Mutex<UVec2> = Mutex::new(UVec2::ZERO);
 
 // Core interface:
 
@@ -61,6 +63,9 @@ pub enum AlvrEvent {
     StreamingStarted {
         view_width: u32,
         view_height: u32,
+        target_view_width: u32,
+        target_view_height: u32,
+        enable_no_scaling: bool,
         refresh_rate_hint: f32,
         encoding_gamma: f32,
         enable_foveated_encoding: bool,
@@ -201,6 +206,7 @@ pub extern "C" fn alvr_initialize(capabilities: AlvrClientCapabilities) {
         capabilities.default_view_width,
         capabilities.default_view_height,
     );
+    *DEFAULT_VIEW_RESOLUTION.lock() = default_view_resolution;
 
     let max_view_resolution = UVec2::new(capabilities.max_view_width, capabilities.max_view_height);
 
@@ -267,10 +273,26 @@ pub extern "C" fn alvr_poll_event(out_event: *mut AlvrEvent) -> bool {
             ClientCoreEvent::StreamingStarted(stream_config) => {
                 *SETTINGS.lock() = serde_json::to_string(&stream_config.settings).unwrap();
                 *SERVER_VERSION.lock() = stream_config.server_version.to_string();
+                let view_resolution = stream_config.negotiated_config.view_resolution;
+                let enable_no_scaling = stream_config.settings.video.view_resolution_scaling
+                    == ViewResolutionScalingMode::NoScaling;
+                let client_native_view_resolution = stream_config
+                    .settings
+                    .video
+                    .client_native_view_resolution
+                    .resolve(*DEFAULT_VIEW_RESOLUTION.lock());
+                let target_view_resolution = if enable_no_scaling {
+                    client_native_view_resolution
+                } else {
+                    view_resolution
+                };
 
                 AlvrEvent::StreamingStarted {
-                    view_width: stream_config.negotiated_config.view_resolution.x,
-                    view_height: stream_config.negotiated_config.view_resolution.y,
+                    view_width: view_resolution.x,
+                    view_height: view_resolution.y,
+                    target_view_width: target_view_resolution.x,
+                    target_view_height: target_view_resolution.y,
+                    enable_no_scaling,
                     refresh_rate_hint: stream_config.negotiated_config.refresh_rate_hint,
                     encoding_gamma: stream_config.negotiated_config.encoding_gamma,
                     enable_foveated_encoding: stream_config
@@ -597,6 +619,9 @@ pub struct AlvrStreamViewParams {
 pub struct AlvrStreamConfig {
     view_resolution_width: u32,
     view_resolution_height: u32,
+    target_view_resolution_width: u32,
+    target_view_resolution_height: u32,
+    enable_no_scaling: bool,
     swapchain_textures: *mut *const u32,
     swapchain_length: u32,
     enable_foveation: bool,
@@ -681,6 +706,18 @@ pub extern "C" fn alvr_update_hud_message_opengl(message: *const c_char) {
 #[unsafe(no_mangle)]
 pub extern "C" fn alvr_start_stream_opengl(config: AlvrStreamConfig) {
     let view_resolution = UVec2::new(config.view_resolution_width, config.view_resolution_height);
+    let mut target_view_resolution = UVec2::new(
+        config.target_view_resolution_width,
+        config.target_view_resolution_height,
+    );
+    if target_view_resolution.x == 0 || target_view_resolution.y == 0 {
+        target_view_resolution = view_resolution;
+    }
+    let view_resolution_scaling = if config.enable_no_scaling {
+        ViewResolutionScalingMode::NoScaling
+    } else {
+        ViewResolutionScalingMode::Scale
+    };
     let swapchain_textures =
         convert_swapchain_array(config.swapchain_textures, config.swapchain_length);
     let foveated_encoding = config.enable_foveation.then_some(FoveatedEncodingConfig {
@@ -692,17 +729,20 @@ pub extern "C" fn alvr_start_stream_opengl(config: AlvrStreamConfig) {
         edge_ratio_x: config.foveation_edge_ratio_x,
         edge_ratio_y: config.foveation_edge_ratio_y,
     });
-    let upscaling = config.enable_upscaling.then_some(UpscalingConfig {
-        edge_direction: config.upscaling_edge_direction,
-        edge_sharpness: config.upscaling_edge_sharpness,
-        edge_threshold: config.upscaling_edge_threshold,
-        upscale_factor: config.upscale_factor,
-    });
+    let upscaling = (view_resolution_scaling == ViewResolutionScalingMode::Scale
+        && config.enable_upscaling)
+        .then_some(UpscalingConfig {
+            edge_direction: config.upscaling_edge_direction,
+            edge_sharpness: config.upscaling_edge_sharpness,
+            edge_threshold: config.upscaling_edge_threshold,
+            upscale_factor: config.upscale_factor,
+        });
 
     STREAM_RENDERER.set(Some(StreamRenderer::new(
         GRAPHICS_CONTEXT.with_borrow(|c| c.as_ref().unwrap().clone()),
         view_resolution,
-        alvr_graphics::compute_target_view_resolution(view_resolution, &upscaling),
+        alvr_graphics::compute_target_view_resolution(target_view_resolution, &upscaling),
+        view_resolution_scaling,
         swapchain_textures,
         SDR_FORMAT_GL,
         foveated_encoding,

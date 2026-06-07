@@ -1,6 +1,7 @@
 use alvr_common::{
     ALVR_VERSION, DebugGroupsConfig, DebugGroupsConfigDefault, LogSeverity, LogSeverityDefault,
     LogSeverityDefaultVariant,
+    glam::{UVec2, Vec2},
 };
 use alvr_system_info::{ClientFlavor, ClientFlavorDefault, ClientFlavorDefaultVariant};
 use bytemuck::{Pod, Zeroable};
@@ -34,11 +35,34 @@ pub enum FrameSize {
     Scale(#[schema(gui(slider(min = 0.25, max = 2.0, step = 0.01)))] f32),
 
     Absolute {
-        #[schema(gui(slider(min = 32, max = 8192, step = 32)))]
+        #[schema(gui(slider(min = 32, max = 8192, step = 1)))]
         width: u32,
-        #[schema(gui(slider(min = 32, max = 8192, step = 32)))]
+        #[schema(gui(slider(min = 32, max = 8192, step = 1)))]
         height: Option<u32>,
     },
+}
+
+impl FrameSize {
+    pub fn resolve(&self, default_res: UVec2) -> UVec2 {
+        let res = match self {
+            FrameSize::Scale(scale) => default_res.as_vec2() * *scale,
+            FrameSize::Absolute { width, height } => {
+                let width = *width as f32;
+                Vec2::new(
+                    width,
+                    height.map_or_else(
+                        || {
+                            let default_res = default_res.as_vec2();
+                            width * default_res.y / default_res.x
+                        },
+                        |h| h as f32,
+                    ),
+                )
+            }
+        };
+
+        res.round().as_uvec2()
+    }
 }
 
 #[repr(u32)]
@@ -689,6 +713,16 @@ pub struct UpscalingConfig {
     pub upscale_factor: f32,
 }
 
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[schema(gui = "button_group")]
+pub enum ViewResolutionScalingMode {
+    #[schema(strings(display_name = "Scale"))]
+    Scale,
+
+    #[schema(strings(display_name = "No scaling"))]
+    NoScaling,
+}
+
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub struct VideoConfig {
     #[schema(flag = "real-time")]
@@ -747,6 +781,20 @@ If you want to reduce the amount of pixelation on the edges, increase the center
     ))]
     #[schema(flag = "steamvr-restart")]
     pub transcoding_view_resolution: FrameSize,
+
+    #[schema(strings(
+        display_name = "View resolution scaling",
+        help = "Controls how the client maps the stream image to the headset view resolution."
+    ))]
+    #[schema(flag = "steamvr-restart")]
+    pub view_resolution_scaling: ViewResolutionScalingMode,
+
+    #[schema(strings(
+        display_name = "Client native view resolution",
+        help = "Native client display resolution for no-scaling mode. Relative to a single eye view."
+    ))]
+    #[schema(flag = "steamvr-restart")]
+    pub client_native_view_resolution: FrameSize,
 
     #[schema(strings(
         help = "This is the resolution that SteamVR will use as default for the game rendering. Relative to a single eye view."
@@ -1661,6 +1709,17 @@ pub fn session_settings_default() -> SettingsDefault {
             },
         },
     };
+    let client_native_view_resolution = FrameSizeDefault {
+        variant: FrameSizeDefaultVariant::Scale,
+        Scale: 1.0,
+        Absolute: FrameSizeAbsoluteDefault {
+            width: 2160,
+            height: OptionalDefault {
+                set: true,
+                content: 2160,
+            },
+        },
+    };
     let default_custom_audio_device = CustomAudioDeviceConfigDefault {
         NameSubstring: "".into(),
         Index: 0,
@@ -1740,6 +1799,10 @@ pub fn session_settings_default() -> SettingsDefault {
             },
             adapter_index: 0,
             transcoding_view_resolution: view_resolution.clone(),
+            view_resolution_scaling: ViewResolutionScalingModeDefault {
+                variant: ViewResolutionScalingModeDefaultVariant::Scale,
+            },
+            client_native_view_resolution,
             emulated_headset_view_resolution: view_resolution,
             preferred_fps: 72.,
             max_buffering_frames: 2.0,
