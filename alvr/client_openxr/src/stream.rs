@@ -12,6 +12,7 @@ use alvr_common::{
     anyhow::Result,
     error,
     glam::{UVec2, Vec2},
+    info,
     parking_lot::RwLock,
 };
 use alvr_graphics::{GraphicsContext, StreamRenderer, StreamViewParams};
@@ -19,6 +20,7 @@ use alvr_packets::{RealTimeConfig, StreamConfig, TrackingData};
 use alvr_session::{
     ClientsideFoveationConfig, ClientsideFoveationMode, ClientsidePostProcessingConfig, CodecType,
     FoveatedEncodingConfig, MediacodecProperty, PassthroughMode, UpscalingConfig,
+    ViewResolutionScalingMode,
 };
 use alvr_system_info::Platform;
 use openxr as xr;
@@ -34,6 +36,8 @@ const DECODER_MAX_TIMEOUT_MULTIPLIER: f32 = 0.8;
 
 pub struct ParsedStreamConfig {
     pub view_resolution: UVec2,
+    pub target_view_resolution: UVec2,
+    pub view_resolution_scaling: ViewResolutionScalingMode,
     pub refresh_rate_hint: f32,
     pub encoding_gamma: f32,
     pub enable_hdr: bool,
@@ -50,9 +54,35 @@ pub struct ParsedStreamConfig {
 }
 
 impl ParsedStreamConfig {
-    pub fn new(config: &StreamConfig) -> Self {
+    pub fn new(config: &StreamConfig, default_view_resolution: UVec2) -> Self {
+        let view_resolution_scaling = config.settings.video.view_resolution_scaling;
+        let client_native_view_resolution = config
+            .settings
+            .video
+            .client_native_view_resolution
+            .resolve(default_view_resolution);
+        let target_view_resolution = match view_resolution_scaling {
+            ViewResolutionScalingMode::Scale => config.negotiated_config.view_resolution,
+            ViewResolutionScalingMode::NoScaling => client_native_view_resolution,
+        };
+        info!(
+            "Client stream view resolution: stream={}x{} default={}x{} native={}x{} \
+            target={}x{} scaling={:?}",
+            config.negotiated_config.view_resolution.x,
+            config.negotiated_config.view_resolution.y,
+            default_view_resolution.x,
+            default_view_resolution.y,
+            client_native_view_resolution.x,
+            client_native_view_resolution.y,
+            target_view_resolution.x,
+            target_view_resolution.y,
+            view_resolution_scaling,
+        );
+
         Self {
             view_resolution: config.negotiated_config.view_resolution,
+            target_view_resolution,
+            view_resolution_scaling,
             refresh_rate_hint: config.negotiated_config.refresh_rate_hint,
             encoding_gamma: config.negotiated_config.encoding_gamma,
             enable_hdr: config.negotiated_config.enable_hdr,
@@ -74,7 +104,9 @@ impl ParsedStreamConfig {
                 .clientside_post_processing
                 .as_option()
                 .cloned(),
-            upscaling: config.settings.video.upscaling.as_option().cloned(),
+            upscaling: (view_resolution_scaling == ViewResolutionScalingMode::Scale)
+                .then(|| config.settings.video.upscaling.as_option().cloned())
+                .flatten(),
             force_software_decoder: config.settings.video.force_software_decoder,
             max_buffering_frames: config.settings.video.max_buffering_frames,
             buffering_history_weight: config.settings.video.buffering_history_weight,
@@ -151,7 +183,7 @@ impl StreamContext {
         };
 
         let target_view_resolution = alvr_graphics::compute_target_view_resolution(
-            config.view_resolution,
+            config.target_view_resolution,
             &config.upscaling,
         );
         let format = graphics::swapchain_format(&gfx_ctx, &xr_session, config.enable_hdr);
@@ -177,6 +209,7 @@ impl StreamContext {
             gfx_ctx,
             config.view_resolution,
             target_view_resolution,
+            config.view_resolution_scaling,
             [
                 swapchains[0]
                     .enumerate_images()
@@ -395,6 +428,11 @@ impl StreamContext {
         // altered FoVs based on settings and view conversions done for canting.
         let input_view_params = view_params;
         let mut output_view_params = input_view_params;
+        if self.config.view_resolution_scaling == ViewResolutionScalingMode::NoScaling {
+            // The server scales the input FOV to match the stream/native pixel ratio.
+            output_view_params[0].fov = crate::from_xr_fov(current_headset_views[0].fov);
+            output_view_params[1].fov = crate::from_xr_fov(current_headset_views[1].fov);
+        }
         // Avoid passing invalid timestamp to runtime.
         // `timestamp` is generally a current vsync time, but may be repeated if frames are
         // dropped. Some runtimes dislike it if the timestamp is repeated for too long, so after

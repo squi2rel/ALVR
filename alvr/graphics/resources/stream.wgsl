@@ -63,8 +63,11 @@ struct VertexOutput {
 fn vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     var result: VertexOutput;
 
-    result.uv = vec2f(f32(vertex_index & 1), f32(vertex_index >> 1));
-    result.position = pc.reprojection_transform * vec4f(result.uv.x - 0.5, 0.5 - result.uv.y, 0.0, 1.0);
+    let quad_uv = vec2f(f32(vertex_index & 1), f32(vertex_index >> 1));
+
+    result.uv = quad_uv;
+    result.position = pc.reprojection_transform
+        * vec4f(quad_uv.x - 0.5, 0.5 - quad_uv.y, 0.0, 1.0);
 
     return result;
 }
