@@ -43,6 +43,46 @@ const OPENVR_INIT_SUCCESS: i32 = 0;
 const OPENVR_INIT_INVALID_PROCESS: i32 = 1;
 const OPENVR_INIT_FAILED: i32 = 2;
 
+fn controller_prediction_timestamp(
+    poll_timestamp: Duration,
+    target_timestamp: Duration,
+    pose_time_offset: Duration,
+) -> Duration {
+    Duration::max(
+        poll_timestamp,
+        target_timestamp.saturating_sub(pose_time_offset),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn controller_prediction_timestamp_does_not_go_before_poll_time() {
+        let poll_timestamp = Duration::from_millis(100);
+        let target_timestamp = Duration::from_millis(120);
+        let pose_time_offset = Duration::from_millis(30);
+
+        assert_eq!(
+            controller_prediction_timestamp(poll_timestamp, target_timestamp, pose_time_offset),
+            poll_timestamp,
+        );
+    }
+
+    #[test]
+    fn controller_prediction_timestamp_removes_steamvr_offset_when_possible() {
+        let poll_timestamp = Duration::from_millis(100);
+        let target_timestamp = Duration::from_millis(150);
+        let pose_time_offset = Duration::from_millis(20);
+
+        assert_eq!(
+            controller_prediction_timestamp(poll_timestamp, target_timestamp, pose_time_offset),
+            Duration::from_millis(130),
+        );
+    }
+}
+
 fn current_process_name() -> Option<String> {
     Some(
         env::current_exe()
@@ -118,8 +158,11 @@ fn event_loop(events_receiver: mpsc::Receiver<ServerCoreEvent>) {
                             poll_timestamp + context.get_motion_to_photon_latency();
                         let controllers_pose_time_offset = context.get_tracker_pose_time_offset();
                         // We need to remove the additional offset that SteamVR adds
-                        let target_controller_timestamp =
-                            target_timestamp.saturating_sub(controllers_pose_time_offset);
+                        let target_controller_timestamp = controller_prediction_timestamp(
+                            poll_timestamp,
+                            target_timestamp,
+                            controllers_pose_time_offset,
+                        );
 
                         let ffi_head_motion = if let Some(motion) =
                             context.get_device_motion(*HEAD_ID, poll_timestamp)
