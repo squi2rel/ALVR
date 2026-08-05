@@ -14,6 +14,7 @@ use alvr_common::{
     glam::{UVec2, Vec2},
     info,
     parking_lot::RwLock,
+    warn,
 };
 use alvr_graphics::{GraphicsContext, StreamRenderer, StreamViewParams};
 use alvr_packets::{RealTimeConfig, StreamConfig, TrackingData};
@@ -33,6 +34,19 @@ use std::{
 };
 
 const DECODER_MAX_TIMEOUT_MULTIPLIER: f32 = 0.8;
+const MAX_VALID_OPENXR_VSYNC_QUEUE_NS: i128 = 1_000_000_000;
+const INVALID_OPENXR_VSYNC_QUEUE_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+fn openxr_vsync_queue(vsync_time: Duration, xr_now_ns: i64) -> Result<Duration, i128> {
+    let vsync_ns = i128::try_from(vsync_time.as_nanos()).unwrap_or(i128::MAX);
+    let queue_ns = vsync_ns - xr_now_ns as i128;
+
+    if queue_ns.abs() > MAX_VALID_OPENXR_VSYNC_QUEUE_NS {
+        Err(queue_ns)
+    } else {
+        Ok(Duration::from_nanos(queue_ns.max(0) as u64))
+    }
+}
 
 pub struct ParsedStreamConfig {
     pub view_resolution: UVec2,
@@ -131,6 +145,7 @@ pub struct StreamContext {
     renderer: StreamRenderer,
     decoder: Option<(VideoDecoderConfig, VideoDecoderSource)>,
     use_custom_reprojection: bool,
+    last_invalid_vsync_queue_log: Option<Instant>,
 }
 
 impl StreamContext {
@@ -275,6 +290,7 @@ impl StreamContext {
             target_view_resolution,
             renderer,
             decoder: None,
+            last_invalid_vsync_queue_log: None,
         };
 
         this.update_reference_space();
@@ -481,10 +497,29 @@ impl StreamContext {
         if !buffer_ptr.is_null()
             && let Some(xr_now) = crate::xr_runtime_now(self.xr_session.instance())
         {
-            self.core_context.report_submit(
-                timestamp,
-                vsync_time.saturating_sub(Duration::from_nanos(xr_now.as_nanos() as u64)),
-            );
+            let xr_now_ns = xr_now.as_nanos();
+
+            match openxr_vsync_queue(vsync_time, xr_now_ns) {
+                Ok(vsync_queue) => self.core_context.report_submit(timestamp, vsync_queue),
+                Err(queue_ns) => {
+                    let now = Instant::now();
+                    if self.last_invalid_vsync_queue_log.is_none_or(|last_log| {
+                        now.saturating_duration_since(last_log)
+                            >= INVALID_OPENXR_VSYNC_QUEUE_LOG_INTERVAL
+                    }) {
+                        self.last_invalid_vsync_queue_log = Some(now);
+                        warn!(
+                            "Ignoring invalid OpenXR vsync queue: queue={:.3}ms \
+                            target={:?} predicted_display={}ns xr_now={}ns frame_interval={:?}",
+                            queue_ns as f64 / 1_000_000.0,
+                            timestamp,
+                            vsync_time.as_nanos(),
+                            xr_now_ns,
+                            frame_interval,
+                        );
+                    }
+                }
+            }
         }
 
         let rect = xr::Rect2Di {
@@ -700,5 +735,54 @@ fn stream_input_loop(
 
         deadline += frame_interval / 3;
         thread::sleep(deadline.saturating_duration_since(Instant::now()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openxr_vsync_queue_accepts_plausible_future_vsync() {
+        let vsync_time = Duration::from_millis(1_005);
+        let xr_now_ns = Duration::from_secs(1).as_nanos() as i64;
+
+        assert_eq!(
+            openxr_vsync_queue(vsync_time, xr_now_ns).unwrap(),
+            Duration::from_millis(5)
+        );
+    }
+
+    #[test]
+    fn openxr_vsync_queue_clamps_slightly_late_submit_to_zero() {
+        let vsync_time = Duration::from_secs(1);
+        let xr_now_ns = Duration::from_millis(1_005).as_nanos() as i64;
+
+        assert_eq!(
+            openxr_vsync_queue(vsync_time, xr_now_ns).unwrap(),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn openxr_vsync_queue_rejects_large_positive_runtime_delta() {
+        let vsync_time = Duration::from_millis(3_270_543);
+        let xr_now_ns = 0;
+
+        assert_eq!(
+            openxr_vsync_queue(vsync_time, xr_now_ns).unwrap_err(),
+            3_270_543_000_000
+        );
+    }
+
+    #[test]
+    fn openxr_vsync_queue_rejects_large_negative_runtime_delta() {
+        let vsync_time = Duration::ZERO;
+        let xr_now_ns = Duration::from_millis(3_270_543).as_nanos() as i64;
+
+        assert_eq!(
+            openxr_vsync_queue(vsync_time, xr_now_ns).unwrap_err(),
+            -3_270_543_000_000
+        );
     }
 }
